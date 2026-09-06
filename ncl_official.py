@@ -10,7 +10,7 @@ USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 SEARCH_URL = 'https://www.ncl.com/api/v2/vacations/search'
 SAILINGS_URL = 'https://www.ncl.com/api/vacations/sailings/'
 EVENTS_URL = 'https://www.ncl.com/api/vacations/events/'
-SHIP_CODES = {'aqua':'AQUA','aura':'AURA','bliss':'BLISS','breakaway':'BREAKAWAY','dawn':'DAWN','encore':'ENCORE','epic':'EPIC','escape':'ESCAPE','gem':'GEM','getaway':'GETAWAY','jade':'JADE','jewel':'JEWEL','joy':'JOY','luna':'LUNA','pearl':'PEARL','prima':'PRIMA','sky':'SKY','spirit':'SPIRIT','star':'STAR','sun':'SUN','viva':'VIVA','pride of america':'PRIDEAMER','pride america':'PRIDEAMER'}
+SHIP_CODES = {'aqua':'AQUA','aura':'AURA','bliss':'BLISS','breakaway':'BREAKAWAY','dawn':'DAWN','encore':'ENCORE','epic':'EPIC','escape':'ESCAPE','gem':'GEM','getaway':'GETAWAY','jade':'JADE','jewel':'JEWEL','joy':'JOY','luna':'LUNA','pearl':'PEARL','prima':'PRIMA','sky':'SKY','spirit':'SPIRIT','star':'STAR','sun':'SUN','viva':'VIVA','pride of america':'PRIDE_AMER','pride america':'PRIDE_AMER','pride_amer':'PRIDE_AMER'}
 MONTH_ABBR = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
 def _get_json(url, timeout=35):
@@ -21,16 +21,32 @@ def _get_json(url, timeout=35):
     except HTTPError as error:
         raise RuntimeError(f'NCL API {error.code} for {url}') from error
 
-def ship_code_from_name(name):
+def _norm_ship(name):
     text = re.sub(r'^norwegian\s+', '', (name or '').strip(), flags=re.I)
-    text = re.sub(r'^n\.\s*', '', text, flags=re.I).strip().lower()
-    text = re.sub(r'[^a-z ]+', ' ', text).strip()
+    text = re.sub(r'^n\.\s*', '', text, flags=re.I)
+    text = re.sub(r'^pride\s+of\s+', 'pride of ', text, flags=re.I)
+    return re.sub(r'[^a-z ]+', ' ', text.lower()).strip()
+
+def ship_code_from_name(name):
+    text = _norm_ship(name)
+    if not text:
+        return ''
     if text in SHIP_CODES:
         return SHIP_CODES[text]
-    for key, code in SHIP_CODES.items():
-        if key in text or text in key:
-            return code
-    return text.upper().replace(' ', '') if text else ''
+    token = text.split()[-1]
+    token_matches = [code for key, code in SHIP_CODES.items() if key.split()[-1] == token]
+    if len(token_matches) == 1:
+        return token_matches[0]
+    return ''
+
+def ship_title_matches(requested, actual):
+    req = _norm_ship(requested)
+    act = _norm_ship(actual)
+    if not req:
+        return True
+    if not act:
+        return False
+    return req == act or req in act or act in req
 
 def itinerary_code_from_url(url):
     if not url:
@@ -123,6 +139,10 @@ def official_lookup(ship_name, month, year, url=''):
             continue
         package_id = meta.get('packageId') or ''
         ship_title = ((meta.get('ship') or {}).get('title')) or ship_name or 'Norwegian'
+        if ship_name and not ship_title_matches(ship_name, ship_title):
+            continue
+        if 'CRUISETOUR' in str(code).upper():
+            continue
         length = ((meta.get('duration') or {}).get('days')) or 7
         try:
             detail = _get_json(f'{EVENTS_URL}{code}/package/{package_id}') if package_id else {'events': []}
