@@ -40,7 +40,7 @@
     panel.style.cssText = "margin-top:22px;padding-top:18px;border-top:1px solid rgba(127,227,196,.16);";
     panel.innerHTML =
         '<div class="section-kicker">OPTION 2 — SEARCH BY ITINERARY</div>' +
-        '<p style="margin:8px 0 12px;color:#9fb3ad;font-size:13px;max-width:720px;">Use this if you know the trip name or region. Example: Baltic Capitals + May + 2027. Leave the ship box blank.</p>' +
+        '<p style="margin:8px 0 12px;color:#9fb3ad;font-size:13px;max-width:720px;">Type the trip name, pick THAT row\'s month and year, then tap PULL BY ITINERARY. Example: Baltic Capitals + May + 2027.</p>' +
         '<div class="ncl-fields">' +
             '<div class="field-block" style="flex:1.4;">' +
                 '<label for="itineraryName">ITINERARY NAME</label>' +
@@ -64,7 +64,7 @@
             '<div class="field-block">' +
                 '<label for="itineraryMonth">MONTH</label>' +
                 '<select id="itineraryMonth">' +
-                    '<option value="">Any</option>' +
+                    '<option value="">Month</option>' +
                     '<option value="1">January</option>' +
                     '<option value="2">February</option>' +
                     '<option value="3">March</option>' +
@@ -89,6 +89,16 @@
     const urlRow = document.querySelector(".ncl-url-row");
     (urlRow || fields).insertAdjacentElement("afterend", panel);
 
+    const regions = {
+        africa: "AFRICA", alaska: "ALASKA", asia: "ASIA", australia: "AUSTRALIA",
+        bahamas: "BAHAMAS", bermuda: "BERMUDA", caribbean: "CARIBBEAN",
+        hawaii: "HAWAII", mediterranean: "MEDITERRANEAN",
+        "greek isles": "GREEK_ISLES", "mexican riviera": "MEXICAN_RIVIERA",
+        "northern europe": "NORTHERN_EUROPE", "panama canal": "PANAMA_CANAL",
+        "south pacific": "SOUTH_PACIFIC", transatlantic: "TRANSATLANTIC",
+        "canada & new england": "CANADA_NEW_ENGL"
+    };
+
     async function pullFromNcl(payload, buttonEl) {
         buttonEl.disabled = true;
         const analyzeButton = document.getElementById("analyzeButton");
@@ -98,35 +108,47 @@
             status.className = "status";
             status.textContent = "Searching NCL.com...";
         }
-        try {
-            const response = await fetch("/api/ncl-lookup", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload)
-            });
-            const data = await response.json();
-            if (!response.ok) throw new Error(data.error || "Could not pull sailings from NCL.com.");
-            const rows = Array.isArray(data.itineraries) ? data.itineraries : [];
-            if (!rows.length) throw new Error("No matching NCL sailings were found.");
-            if (typeof applyItineraries === "function") applyItineraries(rows, "NCL.com");
-            if (status) {
-                status.className = "status success";
-                status.textContent = "Pulled " + rows.length + " sailing" + (rows.length === 1 ? "" : "s") + " from NCL.com.";
+        let lastError;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+                const response = await fetch("/api/ncl-lookup", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Could not pull sailings from NCL.com.");
+                const rows = Array.isArray(data.itineraries) ? data.itineraries : [];
+                if (!rows.length) throw new Error("No matching NCL sailings were found.");
+                if (typeof applyItineraries === "function") applyItineraries(rows, "NCL.com");
+                if (status) {
+                    status.className = "status success";
+                    status.textContent = "Pulled " + rows.length + " sailing" + (rows.length === 1 ? "" : "s") + " from NCL.com.";
+                }
+                lastError = null;
+                break;
+            } catch (error) {
+                lastError = error;
+                if (attempt === 0) await new Promise(function (ok) { setTimeout(ok, 1200); });
             }
-        } catch (error) {
+        }
+        if (lastError) {
+            let message = lastError.message || "Could not pull sailings from NCL.com.";
+            if (/failed to fetch|networkerror|load failed/i.test(message)) {
+                message = "The itinerary search dropped. Pick a month AND year in Option 2, then tap PULL BY ITINERARY once.";
+            }
             const results = document.getElementById("results");
             if (results) {
                 results.innerHTML = '<div class="error-result"></div>';
-                results.firstChild.textContent = error.message;
+                results.firstChild.textContent = message;
             }
             if (status) {
                 status.className = "status error";
-                status.textContent = error.message;
+                status.textContent = message;
             }
-        } finally {
-            buttonEl.disabled = false;
-            if (analyzeButton) analyzeButton.disabled = false;
         }
+        buttonEl.disabled = false;
+        if (analyzeButton) analyzeButton.disabled = false;
     }
 
     freshShip.addEventListener("click", function () {
@@ -154,16 +176,21 @@
         const month = (document.getElementById("itineraryMonth") || {}).value;
         const year = (document.getElementById("itineraryYear") || {}).value;
         if (!itineraryName) {
-            alert("Option 2: type an itinerary name like Baltic Capitals, pick month and year, then tap PULL BY ITINERARY.");
+            alert("Option 2: type an itinerary name first.");
             return;
         }
+        if (!month || !year) {
+            alert("Option 2 needs its own month AND year next to the itinerary name.");
+            return;
+        }
+        const region = regions[itineraryName.toLowerCase()] || "";
         pullFromNcl({
             shipName: "",
-            month: month ? Number(month) : null,
-            year: year ? Number(year) : null,
+            month: Number(month),
+            year: Number(year),
             url: "",
-            destination: "",
-            query: itineraryName
+            destination: region,
+            query: region ? "" : itineraryName
         }, itineraryButton);
     });
 })();
