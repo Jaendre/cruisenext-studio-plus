@@ -48,6 +48,19 @@ def ship_title_matches(requested, actual):
         return False
     return req == act or req in act or act in req
 
+def is_cruise_tour(meta):
+    blob = ' '.join([
+        str(meta.get('code') or ''),
+        str(meta.get('title') or ''),
+        str(meta.get('bundleType') or ''),
+        str(meta.get('objectId') or ''),
+        str((meta.get('duration') or {}).get('text') or ''),
+    ]).upper()
+    bundle = str(meta.get('bundleType') or '').lower()
+    if bundle in {'cruiselandtour', 'cruisetour', 'landtour'}:
+        return True
+    return any(token in blob for token in ('CRUISETOUR', 'CRUISE TOUR', 'CRUISELANDTOUR', 'LAND TOUR'))
+
 def itinerary_code_from_url(url):
     if not url:
         return ''
@@ -132,6 +145,7 @@ def official_lookup(ship_name, month, year, url=''):
         params.pop('dates', None)
         search = _get_json(SEARCH_URL + '?' + urlencode(params))
         itineraries_meta = search.get('itineraries') or []
+    itineraries_meta = [meta for meta in itineraries_meta if not is_cruise_tour(meta)]
     results = []
     for meta in itineraries_meta[:20]:
         code = meta.get('code') or code_from_url
@@ -140,8 +154,6 @@ def official_lookup(ship_name, month, year, url=''):
         package_id = meta.get('packageId') or ''
         ship_title = ((meta.get('ship') or {}).get('title')) or ship_name or 'Norwegian'
         if ship_name and not ship_title_matches(ship_name, ship_title):
-            continue
-        if 'CRUISETOUR' in str(code).upper():
             continue
         length = ((meta.get('duration') or {}).get('days')) or 7
         try:
