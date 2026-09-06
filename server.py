@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parent
 PUBLIC = ROOT / 'public' if (ROOT / 'public' / 'index.html').exists() else ROOT
 ORIGINAL_EXTRACT = 'https://cruisenext-itinerary-studio-multi.onrender.com/api/extract'
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+BATCH_SIZE = 4
+MAX_FILES = 10
 
 def fetch_bytes(url, data=None, headers=None, timeout=30):
     req = Request(url, data=data, headers={'User-Agent': USER_AGENT, **(headers or {})}, method='POST' if data is not None else 'GET')
@@ -27,8 +29,6 @@ def fetch_bytes(url, data=None, headers=None, timeout=30):
         body = error.read() if error.fp else b''
         ct = error.headers.get('Content-Type','') if error.headers else ''
         return error.code, ct, body
-    except URLError as error:
-        raise error
 
 def parse_multipart(handler):
     content_type = handler.headers.get('Content-Type','')
@@ -62,11 +62,10 @@ def parse_multipart(handler):
         files.setdefault(name, []).append((filename, mime, body))
     return files
 
-def proxy_extract(files):
+def _post_extract_batch(batch):
     boundary = '----CruiseNextBoundary7MA4YWxkTrZu0gW'
     chunks = []
-    for index, item in enumerate(files):
-        filename, mime, payload = (item + ('image/png', b''))[:3] if False else item
+    for index, item in enumerate(batch):
         if not isinstance(item, (list, tuple)) or len(item) < 3:
             continue
         filename, mime, payload = item[0], item[1], item[2]
@@ -77,25 +76,43 @@ def proxy_extract(files):
         chunks.append(payload or b'')
         chunks.append(b'\r\n')
     chunks.append(f'--{boundary}--\r\n'.encode())
-    body = b''.join(chunks)
     headers = {'Content-Type': f'multipart/form-data; boundary={boundary}', 'Accept': 'application/json'}
     last_error = None
     for attempt in range(2):
         try:
             if attempt:
                 time.sleep(3)
-            status, content_type, response_body = fetch_bytes(ORIGINAL_EXTRACT, data=body, headers=headers, timeout=90)
+            status, content_type, response_body = fetch_bytes(ORIGINAL_EXTRACT, data=b''.join(chunks), headers=headers, timeout=90)
             if 'application/json' not in (content_type or ''):
                 last_error = 'unexpected response'
                 continue
             parsed = json.loads(response_body.decode('utf-8'))
-            if status < 500 or (isinstance(parsed, dict) and parsed.get('itineraries')):
-                return status, parsed
-            last_error = parsed.get('error') if isinstance(parsed, dict) else status
+            return status, parsed
         except Exception as error:
             last_error = error
-            print('proxy extract failed', attempt + 1, error)
-    return 502, {'error': str(last_error) if last_error else 'Screenshot reader is busy. Try Analyze again.'}
+            print('proxy batch failed', attempt + 1, error)
+    return 502, {'error': str(last_error) if last_error else 'Screenshot reader is busy.'}
+
+def proxy_extract(files):
+    files = list(files)[:MAX_FILES]
+    itineraries = []
+    last_error = None
+    for start in range(0, len(files), BATCH_SIZE):
+        batch = files[start:start + BATCH_SIZE]
+        status, parsed = _post_extract_batch(batch)
+        if isinstance(parsed, dict) and parsed.get('itineraries'):
+            itineraries.extend(parsed['itineraries'])
+        elif isinstance(parsed, dict) and parsed.get('error'):
+            last_error = parsed.get('error')
+            print('batch error', start, last_error)
+        else:
+            last_error = f'batch {start} failed ({status})'
+    if itineraries:
+        for index, item in enumerate(itineraries, start=1):
+            if isinstance(item, dict):
+                item['source_index'] = index
+        return 200, {'itineraries': itineraries}
+    return 502, {'error': last_error or 'Could not read those screenshots.'}
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -111,13 +128,13 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers(); self.wfile.write(raw)
     def do_GET(self):
         if self.path.split('?', 1)[0] == '/api/health':
-            self._json(200, {'ok': True, 'ocr': bool(extract_screenshots)})
+            self._json(200, {'ok': True, 'ocr': bool(extract_screenshots), 'maxFiles': MAX_FILES})
             return
         return super().do_GET()
     def do_POST(self):
         if self.path == '/api/extract':
             try:
-                files = parse_multipart(self).get('images') or []
+                files = (parse_multipart(self).get('images') or [])[:MAX_FILES]
                 if not files:
                     self._json(400, {'error': 'Please upload at least 1 screenshot.'}); return
                 status, payload = proxy_extract(files)
