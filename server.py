@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CruiseNext Itinerary Studio Plus."""
 from __future__ import annotations
-import json, os, email, re
+import json, os, email, re, time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -44,6 +44,12 @@ def parse_multipart(handler):
                 fields[name] = payload.decode('utf-8', errors='ignore')
     return files, fields
 
+def wake_extract_service():
+    try:
+        fetch_bytes(ORIGINAL_EXTRACT.rsplit('/', 1)[0] + '/', timeout=20)
+    except Exception as error:
+        print('wake extract skipped', error)
+
 def proxy_extract(files):
     boundary = '----CruiseNextBoundary7MA4YWxkTrZu0gW'
     chunks=[]
@@ -54,13 +60,20 @@ def proxy_extract(files):
         chunks.append(f'Content-Type: {mime or "image/png"}\r\n\r\n'.encode())
         chunks.append(payload); chunks.append(b'\r\n')
     chunks.append(f'--{boundary}--\r\n'.encode())
-    status, content_type, response_body = fetch_bytes(ORIGINAL_EXTRACT, data=b''.join(chunks), headers={'Content-Type': f'multipart/form-data; boundary={boundary}', 'Accept':'application/json'}, timeout=120)
-    if 'application/json' not in (content_type or ''):
-        return 502, {'error': 'Screenshot analysis backend returned an unexpected response. The original extract service may be waking up — try again in a few seconds.'}
-    try:
-        return status, json.loads(response_body.decode('utf-8'))
-    except Exception:
-        return 502, {'error': 'Could not parse the screenshot analysis response.'}
+    body = b''.join(chunks)
+    headers = {'Content-Type': f'multipart/form-data; boundary={boundary}', 'Accept':'application/json'}
+    for attempt in range(3):
+        try:
+            if attempt:
+                time.sleep(4 * attempt)
+                wake_extract_service()
+            status, content_type, response_body = fetch_bytes(ORIGINAL_EXTRACT, data=body, headers=headers, timeout=120)
+            if 'application/json' not in (content_type or ''):
+                continue
+            return status, json.loads(response_body.decode('utf-8'))
+        except Exception as error:
+            print('extract attempt failed', attempt + 1, error)
+    return 502, {'error': 'Screenshot reading is busy right now. Wait one minute, then tap Analyze again. NCL pull still works.'}
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -84,7 +97,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self._json(status, payload)
             except Exception as error:
                 print('extract proxy failed', error)
-                self._json(502, {'error': 'Could not reach the screenshot analysis backend. NCL lookup still works without screenshots.'})
+                self._json(502, {'error': 'Screenshot reading is busy right now. Wait one minute, then tap Analyze again. NCL pull still works.'})
             return
         if self.path == '/api/ncl-lookup':
             length = int(self.headers.get('Content-Length','0') or 0)
