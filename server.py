@@ -127,8 +127,20 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.end_headers(); self.wfile.write(raw)
     def do_GET(self):
-        if self.path.split('?', 1)[0] == '/api/health':
+        path = self.path.split('?', 1)[0]
+        if path == '/api/health':
             self._json(200, {'ok': True, 'ocr': bool(extract_screenshots), 'maxFiles': MAX_FILES})
+            return
+        if path in ('/', '/index.html'):
+            html = (PUBLIC / 'index.html').read_text(encoding='utf-8')
+            if 'dest.js' not in html:
+                html = html.replace('</body>', '<script src="/dest.js"></script>\n</body>')
+            raw = html.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(raw)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers(); self.wfile.write(raw)
             return
         return super().do_GET()
     def do_POST(self):
@@ -163,16 +175,18 @@ class Handler(SimpleHTTPRequestHandler):
             month = int(body['month']) if body.get('month') else None
             year = int(body['year']) if body.get('year') else None
             direct_url = str(body.get('url') or '').strip()
-            if not ship_name and not direct_url:
-                self._json(400, {'error': 'Enter a ship name or paste an NCL itinerary URL.'}); return
+            destination = str(body.get('destination') or '').strip()
+            query = str(body.get('query') or body.get('itinerary') or '').strip()
+            if not ship_name and not direct_url and not destination and not query:
+                self._json(400, {'error': 'Enter a ship, destination, itinerary name, or NCL URL.'}); return
             try:
-                official = official_lookup(ship_name, month, year, direct_url)
+                official = official_lookup(ship_name, month, year, direct_url, destination, query)
             except Exception as error:
                 print('official lookup failed', error)
                 self._json(502, {'error': f'Could not pull sailings from NCL.com: {error}'}); return
             if not official:
-                self._json(404, {'error': 'No matching NCL sailings were found for that ship and date.'}); return
-            self._json(200, {'source':'ncl.com','queried':{'shipName':ship_name,'month':month,'year':year,'url':direct_url or None},'itineraries':official})
+                self._json(404, {'error': 'No matching NCL sailings were found.'}); return
+            self._json(200, {'source':'ncl.com','queried':{'shipName':ship_name,'month':month,'year':year,'url':direct_url or None,'destination':destination or None,'query':query or None},'itineraries':official})
             return
         self.send_error(404, 'Not Found')
 
