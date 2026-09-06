@@ -1,1 +1,2 @@
-# stdlib only — kept so Render detects a Python app
+pillow
+pytesseract
