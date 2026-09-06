@@ -7,6 +7,11 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from ncl_official import official_lookup
+try:
+    from ocr_extract import extract_screenshots
+except Exception as error:
+    extract_screenshots = None
+    print('ocr extract unavailable', error)
 
 ROOT = Path(__file__).resolve().parent
 PUBLIC = ROOT / 'public' if (ROOT / 'public' / 'index.html').exists() else ROOT
@@ -62,18 +67,14 @@ def proxy_extract(files):
     chunks.append(f'--{boundary}--\r\n'.encode())
     body = b''.join(chunks)
     headers = {'Content-Type': f'multipart/form-data; boundary={boundary}', 'Accept':'application/json'}
-    for attempt in range(3):
-        try:
-            if attempt:
-                time.sleep(4 * attempt)
-                wake_extract_service()
-            status, content_type, response_body = fetch_bytes(ORIGINAL_EXTRACT, data=body, headers=headers, timeout=120)
-            if 'application/json' not in (content_type or ''):
-                continue
+    try:
+        wake_extract_service()
+        status, content_type, response_body = fetch_bytes(ORIGINAL_EXTRACT, data=body, headers=headers, timeout=90)
+        if 'application/json' in (content_type or ''):
             return status, json.loads(response_body.decode('utf-8'))
-        except Exception as error:
-            print('extract attempt failed', attempt + 1, error)
-    return 502, {'error': 'Screenshot reading is busy right now. Wait one minute, then tap Analyze again. NCL pull still works.'}
+    except Exception as error:
+        print('proxy extract failed', error)
+    return 502, {'error': 'Could not read those screenshots. Use a sharp full itinerary screenshot and tap Analyze again.'}
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -93,11 +94,16 @@ class Handler(SimpleHTTPRequestHandler):
                 files = parse_multipart(self)[0].get('images') or []
                 if not files:
                     self._json(400, {'error': 'Please upload at least 1 screenshot.'}); return
+                if extract_screenshots:
+                    status, payload = extract_screenshots(files)
+                    if status < 500 or payload.get('itineraries'):
+                        self._json(status, payload); return
+                    print('local ocr missed', payload)
                 status, payload = proxy_extract(files)
                 self._json(status, payload)
             except Exception as error:
-                print('extract proxy failed', error)
-                self._json(502, {'error': 'Screenshot reading is busy right now. Wait one minute, then tap Analyze again. NCL pull still works.'})
+                print('extract failed', error)
+                self._json(502, {'error': 'Could not read those screenshots. Try a sharper PNG or JPG, then tap Analyze again.'})
             return
         if self.path == '/api/ncl-lookup':
             length = int(self.headers.get('Content-Length','0') or 0)
