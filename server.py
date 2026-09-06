@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """CruiseNext Itinerary Studio Plus."""
 from __future__ import annotations
-import json, os, email, re, time
+import json, os, re, time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from ncl_official import official_lookup
 try:
     from ocr_extract import extract_screenshots
@@ -27,54 +27,75 @@ def fetch_bytes(url, data=None, headers=None, timeout=30):
         body = error.read() if error.fp else b''
         ct = error.headers.get('Content-Type','') if error.headers else ''
         return error.code, ct, body
+    except URLError as error:
+        raise error
 
 def parse_multipart(handler):
     content_type = handler.headers.get('Content-Type','')
     length = int(handler.headers.get('Content-Length','0') or 0)
-    raw = handler.rfile.read(length)
-    parsed = email.message_from_bytes(b'Content-Type: '+content_type.encode('utf-8')+b'\r\n\r\n'+raw)
-    files, fields = {}, {}
-    if parsed.is_multipart():
-        for part in parsed.iter_parts():
-            disposition = part.get('Content-Disposition','')
-            name_match = re.search(r'name="([^"]+)"', disposition)
-            filename_match = re.search(r'filename="([^"]*)"', disposition)
-            if not name_match:
-                continue
-            name = name_match.group(1)
-            payload = part.get_payload(decode=True) or b''
-            if filename_match:
-                files.setdefault(name, []).append((filename_match.group(1), part.get_content_type(), payload))
-            else:
-                fields[name] = payload.decode('utf-8', errors='ignore')
-    return files, fields
-
-def wake_extract_service():
-    try:
-        fetch_bytes(ORIGINAL_EXTRACT.rsplit('/', 1)[0] + '/', timeout=20)
-    except Exception as error:
-        print('wake extract skipped', error)
+    raw = handler.rfile.read(length) if length else b''
+    files = {}
+    match = re.search(r'boundary=([^;]+)', content_type or '')
+    if not match:
+        return files
+    boundary = match.group(1).strip().strip('"').encode('utf-8')
+    for part in raw.split(b'--' + boundary):
+        if not part or part in (b'--', b'--\r\n', b'--\n') or part.startswith(b'--'):
+            continue
+        header, sep, body = part.partition(b'\r\n\r\n')
+        if not sep:
+            header, sep, body = part.partition(b'\n\n')
+        if not sep:
+            continue
+        body = body.rstrip(b'\r\n')
+        if body.endswith(b'--'):
+            body = body[:-2]
+        header_text = header.decode('utf-8', 'ignore')
+        name_match = re.search(r'name="([^"]+)"', header_text)
+        filename_match = re.search(r'filename="([^"]*)"', header_text)
+        if not name_match or not filename_match:
+            continue
+        name = name_match.group(1)
+        filename = filename_match.group(1) or 'screenshot.png'
+        mime_match = re.search(r'Content-Type:\s*([^\r\n]+)', header_text, flags=re.I)
+        mime = (mime_match.group(1).strip() if mime_match else 'image/png')
+        files.setdefault(name, []).append((filename, mime, body))
+    return files
 
 def proxy_extract(files):
     boundary = '----CruiseNextBoundary7MA4YWxkTrZu0gW'
-    chunks=[]
-    for index, (filename, mime, payload) in enumerate(files):
+    chunks = []
+    for index, item in enumerate(files):
+        filename, mime, payload = (item + ('image/png', b''))[:3] if False else item
+        if not isinstance(item, (list, tuple)) or len(item) < 3:
+            continue
+        filename, mime, payload = item[0], item[1], item[2]
         name = filename or f'screenshot-{index+1}.png'
         chunks.append(f'--{boundary}\r\n'.encode())
         chunks.append(f'Content-Disposition: form-data; name="images"; filename="{name}"\r\n'.encode())
         chunks.append(f'Content-Type: {mime or "image/png"}\r\n\r\n'.encode())
-        chunks.append(payload); chunks.append(b'\r\n')
+        chunks.append(payload or b'')
+        chunks.append(b'\r\n')
     chunks.append(f'--{boundary}--\r\n'.encode())
     body = b''.join(chunks)
-    headers = {'Content-Type': f'multipart/form-data; boundary={boundary}', 'Accept':'application/json'}
-    try:
-        wake_extract_service()
-        status, content_type, response_body = fetch_bytes(ORIGINAL_EXTRACT, data=body, headers=headers, timeout=90)
-        if 'application/json' in (content_type or ''):
-            return status, json.loads(response_body.decode('utf-8'))
-    except Exception as error:
-        print('proxy extract failed', error)
-    return 502, {'error': 'Could not read those screenshots. Use a sharp full itinerary screenshot and tap Analyze again.'}
+    headers = {'Content-Type': f'multipart/form-data; boundary={boundary}', 'Accept': 'application/json'}
+    last_error = None
+    for attempt in range(2):
+        try:
+            if attempt:
+                time.sleep(3)
+            status, content_type, response_body = fetch_bytes(ORIGINAL_EXTRACT, data=body, headers=headers, timeout=90)
+            if 'application/json' not in (content_type or ''):
+                last_error = 'unexpected response'
+                continue
+            parsed = json.loads(response_body.decode('utf-8'))
+            if status < 500 or (isinstance(parsed, dict) and parsed.get('itineraries')):
+                return status, parsed
+            last_error = parsed.get('error') if isinstance(parsed, dict) else status
+        except Exception as error:
+            last_error = error
+            print('proxy extract failed', attempt + 1, error)
+    return 502, {'error': str(last_error) if last_error else 'Screenshot reader is busy. Try Analyze again.'}
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -82,28 +103,37 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         print('[plus]', self.address_string(), format % args)
     def _json(self, status, payload):
-        raw = json.dumps(payload).encode('utf-8')
+        raw = json.dumps(payload, default=str).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(raw)))
         self.send_header('Cache-Control', 'no-store')
         self.end_headers(); self.wfile.write(raw)
+    def do_GET(self):
+        if self.path.split('?', 1)[0] == '/api/health':
+            self._json(200, {'ok': True, 'ocr': bool(extract_screenshots)})
+            return
+        return super().do_GET()
     def do_POST(self):
         if self.path == '/api/extract':
             try:
-                files = parse_multipart(self)[0].get('images') or []
+                files = parse_multipart(self).get('images') or []
                 if not files:
                     self._json(400, {'error': 'Please upload at least 1 screenshot.'}); return
-                if extract_screenshots:
-                    status, payload = extract_screenshots(files)
-                    if status < 500 or payload.get('itineraries'):
-                        self._json(status, payload); return
-                    print('local ocr missed', payload)
                 status, payload = proxy_extract(files)
-                self._json(status, payload)
+                if isinstance(payload, dict) and payload.get('itineraries'):
+                    self._json(status, payload); return
+                if extract_screenshots:
+                    try:
+                        ocr_status, ocr_payload = extract_screenshots(files)
+                        if isinstance(ocr_payload, dict) and (ocr_payload.get('itineraries') or ocr_status < 500):
+                            self._json(ocr_status, ocr_payload); return
+                    except Exception as error:
+                        print('local ocr failed', error)
+                self._json(status if status else 502, payload if isinstance(payload, dict) else {'error': 'Could not read those screenshots.'})
             except Exception as error:
                 print('extract failed', error)
-                self._json(502, {'error': 'Could not read those screenshots. Try a sharper PNG or JPG, then tap Analyze again.'})
+                self._json(502, {'error': f'Could not read those screenshots: {error}'})
             return
         if self.path == '/api/ncl-lookup':
             length = int(self.headers.get('Content-Length','0') or 0)
