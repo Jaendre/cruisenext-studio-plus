@@ -12,6 +12,7 @@ SAILINGS_URL = 'https://www.ncl.com/api/vacations/sailings/'
 EVENTS_URL = 'https://www.ncl.com/api/vacations/events/'
 SHIP_CODES = {'aqua':'AQUA','aura':'AURA','bliss':'BLISS','breakaway':'BREAKAWAY','dawn':'DAWN','encore':'ENCORE','epic':'EPIC','escape':'ESCAPE','gem':'GEM','getaway':'GETAWAY','jade':'JADE','jewel':'JEWEL','joy':'JOY','luna':'LUNA','pearl':'PEARL','prima':'PRIMA','sky':'SKY','spirit':'SPIRIT','star':'STAR','sun':'SUN','viva':'VIVA','pride of america':'PRIDE_AMER','pride america':'PRIDE_AMER','pride_amer':'PRIDE_AMER'}
 MONTH_ABBR = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+REGION_MAP = {'africa':'AFRICA','alaska':'ALASKA','asia':'ASIA','australia':'AUSTRALIA','australia & new zealand':'AUSTRALIA','bahamas':'BAHAMAS','bermuda':'BERMUDA','canada':'CANADA_NEW_ENGL','canada & new england':'CANADA_NEW_ENGL','caribbean':'CARIBBEAN','extraordinary journeys':'EXTRAORDINARY_JOURNEYS','greek isles':'GREEK_ISLES','greece':'GREEK_ISLES','hawaii':'HAWAII','hawaiian islands':'HAWAII','mediterranean':'MEDITERRANEAN','mexican riviera':'MEXICAN_RIVIERA','northern europe':'NORTHERN_EUROPE','baltic':'NORTHERN_EUROPE','baltic capitals':'NORTHERN_EUROPE','pacific coastal':'PACIFIC_COASTAL','panama canal':'PANAMA_CANAL','south america':'SOUTH_AMERICA','south pacific':'SOUTH_PACIFIC','transatlantic':'TRANSATLANTIC','weekend':'WEEKEND'}
 
 def _get_json(url, timeout=35):
     req = Request(url, headers={'User-Agent': USER_AGENT, 'Accept': 'application/json'})
@@ -60,6 +61,31 @@ def is_cruise_tour(meta):
     if bundle in {'cruiselandtour', 'cruisetour', 'landtour'}:
         return True
     return any(token in blob for token in ('CRUISETOUR', 'CRUISE TOUR', 'CRUISELANDTOUR', 'LAND TOUR'))
+
+def _meta_blob(meta):
+    dests = meta.get('destinations') or []
+    dest_text = ' '.join((d.get('title') or d.get('code') or '') if isinstance(d, dict) else str(d) for d in dests)
+    return ' '.join([
+        str(meta.get('title') or ''),
+        dest_text,
+        str((meta.get('embarkationPort') or {}).get('title') or ''),
+        str((meta.get('disembarkationPort') or {}).get('title') or ''),
+    ]).lower()
+
+def matches_itinerary_filter(meta, dest_code, query_text):
+    blob = _meta_blob(meta)
+    if dest_code:
+        pretty = dest_code.replace('_', ' ').lower()
+        tokens = [t for t in pretty.split() if t not in {'and', 'the', 'of', 'new'}]
+        if dest_code.lower() in blob.replace(' ', '_') or pretty in blob or all(t in blob for t in tokens):
+            return True
+        if dest_code == 'GREEK_ISLES' and ('greek' in blob or 'greece' in blob):
+            return True
+        return False
+    if query_text:
+        tokens = [t for t in re.split(r'\W+', query_text.lower()) if t and t not in {'and', 'the', 'of', 'a'}]
+        return bool(tokens) and all(token in blob for token in tokens)
+    return True
 
 def itinerary_code_from_url(url):
     if not url:
@@ -136,26 +162,35 @@ def official_lookup(ship_name, month, year, url='', destination='', query=''):
     if dates:
         params['dates'] = dates
     dest_code = str(destination or '').strip().upper().replace(' ', '_')
+    query_text = str(query or '').strip()
+    if not dest_code:
+        dest_code = REGION_MAP.get(query_text.lower(), '')
+        if dest_code in {'NORTHERN_EUROPE'} and 'baltic' in query_text.lower():
+            dest_code = ''
     if dest_code in {'CANADA_NEW_ENGLAND', 'CANADA'}:
         dest_code = 'CANADA_NEW_ENGL'
     if dest_code:
         params['destinations'] = dest_code
-    query_text = str(query or '').strip()
-    if query_text:
+    if query_text and dest_code not in REGION_MAP.values():
         params['query'] = query_text
+    elif query_text and not dest_code:
+        params['query'] = query_text
+    if dest_code and query_text and dest_code in REGION_MAP.values():
+        params.pop('query', None)
     if code_from_url:
         params['itineraryCodes'] = code_from_url
     if not ship_code and not code_from_url and not dest_code and not query_text:
         return []
     search = _get_json(SEARCH_URL + '?' + urlencode(params))
     itineraries_meta = search.get('itineraries') or []
-    if not itineraries_meta and dates:
+    if not itineraries_meta and dates and not dest_code and not query_text:
         params.pop('dates', None)
         search = _get_json(SEARCH_URL + '?' + urlencode(params))
         itineraries_meta = search.get('itineraries') or []
     itineraries_meta = [meta for meta in itineraries_meta if not is_cruise_tour(meta)]
+    itineraries_meta = [meta for meta in itineraries_meta if matches_itinerary_filter(meta, dest_code, query_text)]
     results = []
-    for meta in itineraries_meta[:20]:
+    for meta in itineraries_meta[:12]:
         code = meta.get('code') or code_from_url
         if not code:
             continue
