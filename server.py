@@ -133,8 +133,13 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path in ('/', '/index.html'):
             html = (PUBLIC / 'index.html').read_text(encoding='utf-8')
+            scripts = ''
             if 'dest.js' not in html:
-                html = html.replace('</body>', '<script src="/dest.js"></script>\n</body>')
+                scripts += '<script src="/dest.js"></script>\n'
+            if 'reset.js' not in html:
+                scripts += '<script src="/reset.js"></script>\n'
+            if scripts:
+                html = html.replace('</body>', scripts + '</body>')
             raw = html.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
